@@ -1,4 +1,3 @@
-// Durable Object for managing whiteboard state
 export class WhiteboardRoom {
   constructor(state, env) {
     this.state = state;
@@ -32,7 +31,6 @@ export class WhiteboardRoom {
     webSocket.accept();
     this.sessions.add(webSocket);
 
-    // Send existing drawings to new client
     webSocket.send(JSON.stringify({
       type: 'load-drawings',
       data: this.drawings
@@ -45,7 +43,6 @@ export class WhiteboardRoom {
         switch (message.type) {
           case 'draw':
             this.drawings.push(message.data);
-            // Broadcast to all connected clients
             this.broadcast(JSON.stringify({
               type: 'draw',
               data: message.data
@@ -86,12 +83,10 @@ export class WhiteboardRoom {
   }
 }
 
-// Main worker
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
     
-    // Handle CORS preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, {
         status: 200,
@@ -104,7 +99,6 @@ export default {
       });
     }
 
-    // Health check endpoint
     if (url.pathname === '/ping') {
       return new Response(JSON.stringify({ status: 'pong' }), {
         headers: {
@@ -114,7 +108,6 @@ export default {
       });
     }
 
-    // WebSocket upgrade for whiteboard
     if (url.pathname === '/socket.io/' || url.pathname === '/ws') {
       const id = env.WHITEBOARD_ROOM.idFromName('main-room');
       const room = env.WHITEBOARD_ROOM.get(id);
