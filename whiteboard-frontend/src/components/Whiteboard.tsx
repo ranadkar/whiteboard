@@ -24,30 +24,12 @@ const Whiteboard: React.FC = () => {
       ctx.moveTo(data.from.x, data.from.y);
       ctx.lineTo(data.to.x, data.to.y);
       ctx.stroke();
-
-      // circle at ends for smooth corners
-      ctx.beginPath();
-      ctx.arc(data.to.x, data.to.y, data.size / 2, 0, Math.PI * 2);
-      ctx.fillStyle = data.color;
-      ctx.fill();
-
-      ctx.beginPath();
-      ctx.moveTo(data.to.x, data.to.y);
     } else {
       // single pt
-      ctx.beginPath();
-      ctx.lineWidth = data.size;
-      ctx.strokeStyle = data.color;
-      ctx.lineTo(data.x, data.y);
-      ctx.stroke();
-
       ctx.beginPath();
       ctx.arc(data.x, data.y, data.size / 2, 0, Math.PI * 2);
       ctx.fillStyle = data.color;
       ctx.fill();
-
-      ctx.beginPath();
-      ctx.moveTo(data.x, data.y);
     }
   }, [ctx]);
 
@@ -61,6 +43,7 @@ const Whiteboard: React.FC = () => {
   useEffect(() => {
     const connectWebSocket = () => {
       const socket = new WebSocket('wss://whiteboard-backend.mr-raj-nadkarni.workers.dev/ws');
+      // const socket = new WebSocket('ws://localhost:8787/ws');
       socketRef.current = socket;
 
       socket.onopen = () => {
@@ -198,46 +181,50 @@ const Whiteboard: React.FC = () => {
     ctx.strokeStyle = color;
     ctx.fillStyle = color;
 
+    //local shenanigans
+    ctx.beginPath();
+    ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+    ctx.fill();
+
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
       socketRef.current.send(JSON.stringify({
         type: 'draw',
         data: { x, y, color, size }
       }));
     }
+
+    prevPoint.current = { x, y };
   };
 
   const prevPoint = useRef<{ x: number, y: number } | null>(null);
 
   const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
-    if (!isDrawing || !ctx) return;
+    if (!isDrawing || !ctx || !prevPoint.current) return;
 
     const coords = getCoordinates(e);
     if (!coords) return;
 
     const { x, y } = coords;
 
-    // draw it locally
+    ctx.beginPath();
+    ctx.lineWidth = size;
+    ctx.strokeStyle = color;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.moveTo(prevPoint.current.x, prevPoint.current.y);
     ctx.lineTo(x, y);
     ctx.stroke();
 
-    // check for previous point, draw a line between
     if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
-      if (prevPoint.current) {
-        socketRef.current.send(JSON.stringify({
-          type: 'draw',
-          data: {
-            from: { x: prevPoint.current.x, y: prevPoint.current.y },
-            to: { x, y },
-            color,
-            size
-          }
-        }));
-      } else {
-        socketRef.current.send(JSON.stringify({
-          type: 'draw',
-          data: { x, y, color, size }
-        }));
-      }
+      socketRef.current.send(JSON.stringify({
+        type: 'draw',
+        data: {
+          from: { x: prevPoint.current.x, y: prevPoint.current.y },
+          to: { x, y },
+          color,
+          size
+        }
+      }));
     }
 
     prevPoint.current = { x, y };
@@ -246,9 +233,6 @@ const Whiteboard: React.FC = () => {
   const stopDrawing = () => {
     setIsDrawing(false);
     prevPoint.current = null;
-    if (ctx) {
-      ctx.beginPath();
-    }
   };
 
   const clearCanvas = useCallback(() => {
