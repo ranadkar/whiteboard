@@ -9,7 +9,21 @@ const Whiteboard: React.FC = () => {
   const socketRef = useRef<WebSocket | null>(null);
   const [ctx, setCtx] = useState<CanvasRenderingContext2D | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  // this is connection status
+  const [tool, setTool] = useState<'pen' | 'eraser'>('pen');
+  const erasedThisDragRef = useRef<Set<string>>(new Set());
+
+  const [userId] = useState<string>(() => {
+    const existing = localStorage.getItem('wb_userId');
+    if (existing) return existing;
+    const id = (window.crypto && 'randomUUID' in window.crypto) ? (window.crypto as any).randomUUID() : Math.random().toString(36).slice(2);
+    localStorage.setItem('wb_userId', id);
+    return id;
+  });
+
+  type Pt = { x: number; y: number };
+  type Stroke = { id: string; userId: string; color: string; size: number; points: Pt[]; createdAt: number; isVisible: boolean };
+  const strokesRef = useRef<Map<string, Stroke>>(new Map());
+  const orderRef = useRef<string[]>([]);
 
   const drawFromData = useCallback((data: any) => {
     if (!ctx) return;
@@ -40,10 +54,68 @@ const Whiteboard: React.FC = () => {
     }
   }, [ctx]);
 
+  const hitTestStroke = (p: { x: number; y: number }): string | null => {
+    const threshold = Math.max(8, size);
+    const distPt = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
+    const distToSeg = (px: number, py: number, x1: number, y1: number, x2: number, y2: number) => {
+      const A = px - x1, B = py - y1, C = x2 - x1, D = y2 - y1;
+      const dot = A * C + B * D;
+      const len_sq = C * C + D * D;
+      let t = len_sq ? dot / len_sq : -1;
+      t = Math.max(0, Math.min(1, t));
+      const xx = x1 + t * C;
+      const yy = y1 + t * D;
+      return Math.hypot(px - xx, py - yy);
+    };
+    for (let i = orderRef.current.length - 1; i >= 0; i--) {
+      const id = orderRef.current[i];
+      const s = strokesRef.current.get(id);
+      if (!s || !s.isVisible) continue;
+      const pts = s.points;
+      if (pts.length === 1) {
+        if (distPt(p, pts[0]) <= threshold + s.size / 2) return id;
+      } else {
+        for (let j = 1; j < pts.length; j++) {
+          const d = distToSeg(p.x, p.y, pts[j - 1].x, pts[j - 1].y, pts[j].x, pts[j].y);
+          if (d <= threshold + s.size / 2) return id;
+        }
+      }
+    }
+    return null;
+  };
+
+  const renderAllVisibleStrokes = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    for (const id of orderRef.current) {
+      const s = strokesRef.current.get(id);
+      if (!s || !s.isVisible) continue;
+      if (s.points.length === 1) {
+        const p = s.points[0];
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, s.size / 2, 0, Math.PI * 2);
+        ctx.fillStyle = s.color;
+        ctx.fill();
+      } else {
+        ctx.beginPath();
+        ctx.lineWidth = s.size;
+        ctx.strokeStyle = s.color;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.moveTo(s.points[0].x, s.points[0].y);
+        for (let i = 1; i < s.points.length; i++) {
+          ctx.lineTo(s.points[i].x, s.points[i].y);
+        }
+        ctx.stroke();
+      }
+    }
+  }, [ctx]);
+
   useEffect(() => {
     const connectWebSocket = () => {
-      const socket = new WebSocket('wss://whiteboard-backend.mr-raj-nadkarni.workers.dev/ws');
-      // const socket = new WebSocket('ws://localhost:8787/ws');
+      const WS_URL = (process.env.REACT_APP_WS_URL as string)
+      const socket = new WebSocket(WS_URL);
       socketRef.current = socket;
 
       socket.onopen = () => {
@@ -67,6 +139,21 @@ const Whiteboard: React.FC = () => {
           const message = JSON.parse(event.data);
 
           switch (message.type) {
+            case 'hello':
+              // user id, todo add user stuff
+              break;
+
+            case 'load-strokes': {
+              strokesRef.current.clear();
+              orderRef.current = [];
+              const arr = (message.data || []) as any[];
+              for (const s of arr) {
+                strokesRef.current.set(s.id, s);
+                orderRef.current.push(s.id);
+              }
+              renderAllVisibleStrokes();
+              break;
+            }
             case 'load-drawings':
               if (ctx && message.data) {
                 message.data.forEach((drawing: any) => {
@@ -81,8 +168,55 @@ const Whiteboard: React.FC = () => {
               }
               break;
 
+            case 'stroke:added': {
+              const s = message.data as any;
+              strokesRef.current.set(s.id, s);
+              orderRef.current.push(s.id);
+              if (s.isVisible) {
+                if (s.points.length === 1) {
+                  const p = s.points[0];
+                  ctx?.beginPath();
+                  if (ctx) {
+                    ctx.arc(p.x, p.y, s.size / 2, 0, Math.PI * 2);
+                    ctx.fillStyle = s.color;
+                    ctx.fill();
+                  }
+                } else if (ctx) {
+                  ctx.beginPath();
+                  ctx.lineWidth = s.size;
+                  ctx.strokeStyle = s.color;
+                  ctx.lineCap = 'round';
+                  ctx.lineJoin = 'round';
+                  ctx.moveTo(s.points[0].x, s.points[0].y);
+                  for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+                  ctx.stroke();
+                }
+              }
+              break;
+            }
+
+            case 'stroke:hidden': {
+              const id = message.strokeId as string;
+              const s = strokesRef.current.get(id);
+              if (s) s.isVisible = false;
+              renderAllVisibleStrokes();
+              break;
+            }
+
+            case 'stroke:shown': {
+              const id = message.strokeId as string;
+              const s = strokesRef.current.get(id);
+              if (s) s.isVisible = true;
+              renderAllVisibleStrokes();
+              break;
+            }
+
             case 'clear':
-              clearCanvasLocal();
+              for (const id of orderRef.current) {
+                const s = strokesRef.current.get(id);
+                if (s) s.isVisible = false;
+              }
+              renderAllVisibleStrokes();
               break;
           }
         } catch (err) {
@@ -173,7 +307,16 @@ const Whiteboard: React.FC = () => {
     if (!coords || !ctx) return;
 
     const { x, y } = coords;
-    setIsDrawing(true);
+    if (tool === 'eraser') {
+      setIsDrawing(true);
+      const hitId = hitTestStroke({ x, y });
+      if (hitId && !erasedThisDragRef.current.has(hitId) && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+        erasedThisDragRef.current.add(hitId);
+        socketRef.current.send(JSON.stringify({ type: 'stroke:delete', userId, strokeId: hitId }));
+      }
+    } else {
+      setIsDrawing(true);
+    }
 
     ctx.beginPath();
     ctx.moveTo(x, y);
@@ -182,11 +325,13 @@ const Whiteboard: React.FC = () => {
     ctx.fillStyle = color;
 
     //local shenanigans
-    ctx.beginPath();
-    ctx.arc(x, y, size / 2, 0, Math.PI * 2);
-    ctx.fill();
+    if (tool === 'pen') {
+      ctx.beginPath();
+      ctx.arc(x, y, size / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN && tool === 'pen') {
       socketRef.current.send(JSON.stringify({
         type: 'draw',
         data: { x, y, color, size }
@@ -194,12 +339,45 @@ const Whiteboard: React.FC = () => {
     }
 
     prevPoint.current = { x, y };
+
+    currentStrokeRef.current = tool === 'pen' ? {
+      id: (window.crypto && 'randomUUID' in window.crypto) ? (window.crypto as any).randomUUID() : Math.random().toString(36).slice(2),
+      userId,
+      color,
+      size,
+      points: [{ x, y }],
+      createdAt: Date.now(),
+      isVisible: true
+    } : null;
   };
 
   const prevPoint = useRef<{ x: number, y: number } | null>(null);
+  const currentStrokeRef = useRef<any>(null);
 
   const draw = (e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>) => {
     if (!isDrawing || !ctx || !prevPoint.current) return;
+
+    if (tool === 'eraser') {
+      const coords = getCoordinates(e);
+      if (!coords) return;
+      const { x, y } = coords;
+      const from = prevPoint.current;
+      const dx = x - from.x;
+      const dy = y - from.y;
+      const dist = Math.hypot(dx, dy);
+      const steps = Math.max(1, Math.floor(dist / 5));
+      for (let i = 1; i <= steps; i++) {
+        const sx = from.x + (dx * i) / steps;
+        const sy = from.y + (dy * i) / steps;
+        const hitId = hitTestStroke({ x: sx, y: sy });
+        if (hitId && !erasedThisDragRef.current.has(hitId) && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+          erasedThisDragRef.current.add(hitId);
+          socketRef.current.send(JSON.stringify({ type: 'stroke:delete', userId, strokeId: hitId }));
+        }
+      }
+      prevPoint.current = { x, y };
+      return;
+    }
 
     const coords = getCoordinates(e);
     if (!coords) return;
@@ -215,7 +393,7 @@ const Whiteboard: React.FC = () => {
     ctx.lineTo(x, y);
     ctx.stroke();
 
-    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+    if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN && tool === 'pen') {
       socketRef.current.send(JSON.stringify({
         type: 'draw',
         data: {
@@ -228,11 +406,25 @@ const Whiteboard: React.FC = () => {
     }
 
     prevPoint.current = { x, y };
+    if (currentStrokeRef.current) {
+      currentStrokeRef.current.points.push({ x, y });
+    }
   };
 
   const stopDrawing = () => {
     setIsDrawing(false);
     prevPoint.current = null;
+    if (tool === 'pen' && currentStrokeRef.current && socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
+      const stroke = currentStrokeRef.current;
+      // optimistic local caching
+      strokesRef.current.set(stroke.id, stroke);
+      orderRef.current.push(stroke.id);
+      socketRef.current.send(JSON.stringify({ type: 'stroke:commit', data: stroke }));
+    }
+    currentStrokeRef.current = null;
+    if (tool === 'eraser') {
+      erasedThisDragRef.current.clear();
+    }
   };
 
   const clearCanvas = useCallback(() => {
@@ -241,11 +433,49 @@ const Whiteboard: React.FC = () => {
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
         socketRef.current.send(JSON.stringify({
-          type: 'clear'
+          type: 'clear',
+          userId
         }));
       }
     }
-  }, [ctx]);
+  }, [ctx, userId]);
+
+  const sendUndo = () => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    if (isDrawing) {
+      setIsDrawing(false);
+      prevPoint.current = null;
+      currentStrokeRef.current = null;
+      renderAllVisibleStrokes();
+    }
+    socketRef.current.send(JSON.stringify({ type: 'history:undo', userId }));
+  };
+
+  const sendRedo = () => {
+    if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
+    socketRef.current.send(JSON.stringify({ type: 'history:redo', userId }));
+  };
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.toUpperCase().includes('MAC');
+      const mod = isMac ? e.metaKey : e.ctrlKey;
+      if (!mod) return;
+      if (e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey && isMac) {
+          sendRedo();
+        } else {
+          sendUndo();
+        }
+      } else if (e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        sendRedo();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   const connectionStatusClass = isConnected ? 'connected' : 'disconnected';
 
@@ -257,6 +487,12 @@ const Whiteboard: React.FC = () => {
           {isConnected ? 'Connected' : 'Disconnected'}
         </span>
         <div className="toolbar-spacer" />
+        <select value={tool} onChange={(e) => setTool(e.target.value as any)}>
+          <option value="pen">Draw</option>
+          <option value="eraser">Erase</option>
+        </select>
+        <button onClick={sendUndo}>Undo</button>
+        <button onClick={sendRedo}>Redo</button>
         <input
           type="color"
           value={color}
