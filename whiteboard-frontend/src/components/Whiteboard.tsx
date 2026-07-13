@@ -47,13 +47,6 @@ const Whiteboard: React.FC = () => {
     }
   }, [ctx]);
 
-  const clearCanvasLocal = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (canvas && ctx) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-    }
-  }, [ctx]);
-
   const hitTestStroke = (p: { x: number; y: number }): string | null => {
     const threshold = Math.max(8, size);
     const distPt = (a: Pt, b: Pt) => Math.hypot(a.x - b.x, a.y - b.y);
@@ -232,7 +225,7 @@ const Whiteboard: React.FC = () => {
         socketRef.current.close();
       }
     };
-  }, [ctx, drawFromData, clearCanvasLocal]);
+  }, [ctx, drawFromData, renderAllVisibleStrokes]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -440,7 +433,7 @@ const Whiteboard: React.FC = () => {
     }
   }, [ctx, userId]);
 
-  const sendUndo = () => {
+  const sendUndo = useCallback(() => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
     if (isDrawing) {
       setIsDrawing(false);
@@ -449,12 +442,12 @@ const Whiteboard: React.FC = () => {
       renderAllVisibleStrokes();
     }
     socketRef.current.send(JSON.stringify({ type: 'history:undo', userId }));
-  };
+  }, [isDrawing, renderAllVisibleStrokes, userId]);
 
-  const sendRedo = () => {
+  const sendRedo = useCallback(() => {
     if (!socketRef.current || socketRef.current.readyState !== WebSocket.OPEN) return;
     socketRef.current.send(JSON.stringify({ type: 'history:redo', userId }));
-  };
+  }, [userId]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -475,7 +468,7 @@ const Whiteboard: React.FC = () => {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [sendRedo, sendUndo]);
 
   const connectionStatusClass = isConnected ? 'connected' : 'disconnected';
 
