@@ -6,12 +6,6 @@
   flex-direction: column;
 }
 
-.App-header {
-  background-color: #282c34;
-  padding: 20px;
-  color: white;
-}
-
 main {
   flex: 1;
   padding: 20px;
@@ -72,11 +66,4 @@ canvas {
 
 .toolbar button:hover {
   background: #ff3333;
-}
-
-footer {
-  padding: 10px;
-  background: #282c34;
-  color: white;
-  font-size: 0.9em;
 }
